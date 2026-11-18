@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "trader": {
+      "command": "python",
+      "args": ["-m", "doblegrafo.mcp_server"],
+      "env": { "TRADER_DB": "~/.trader/trader.db" }
+    }
+  }
+}

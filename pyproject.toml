@@ -1,0 +1,15 @@
+[project]
+name = "doblegrafo"
+version = "0.1.0"
+description = "Doble grafo (mercado + exploración) para coordinar agentes de trading"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.9,<2"]
+
+[project.scripts]
+trader-mcp = "doblegrafo.mcp_server:main"
+
+[tool.setuptools]
+packages = ["doblegrafo"]
+
+[tool.setuptools.package-data]
+doblegrafo = ["schema.sql"]
