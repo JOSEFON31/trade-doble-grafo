@@ -234,14 +234,39 @@ class WalkForwardResult:
                 "holdout_reservado_desde": self.holdout_from}
 
 
+class _Scheduled(Strategy):
+    """Cambia de parámetros en cada frontera de ventana sin cerrar la cartera (walk-forward continuo)."""
+    name = "walk_forward"
+
+    def __init__(self, base: str, schedule: list[tuple[str, Strategy]]):
+        self.params = {}
+        self.base = base
+        self.schedule = sorted(schedule, key=lambda x: x[0])
+
+    @property
+    def label(self) -> str:
+        return f"walk_forward({self.base})"
+
+    def decide(self, symbol, bars, held):
+        day = bars[-1]["day"]
+        active = None
+        for d0, strat in self.schedule:
+            if d0 <= day:
+                active = strat
+        return active.decide(symbol, bars, held) if active else None
+
+
 def walk_forward(prices: Prices, strategy_name: str, *, start: str | None = None, end: str | None = None,
                  train_years: float = 3, test_years: float = 1, holdout_months: int = 12,
                  use_holdout: bool = False, capital: float = 10_000, limits: RiskLimits | None = None,
                  costs: CostModel | None = None, param_grid: list[dict] | None = None,
-                 extra_trials: int = 0) -> WalkForwardResult:
-    """Elige parámetros en cada ventana de entrenamiento y los prueba en la siguiente.
+                 prior_trial_sharpes: list[float] | None = None) -> WalkForwardResult:
+    """Elige parámetros en cada ventana de entrenamiento y los aplica en la siguiente.
 
-    `extra_trials`: pruebas hechas antes (p. ej. por Claude) que también cuentan para deflactar.
+    La parte fuera de muestra se simula como UNA sola cartera continua que cambia de
+    parámetros en cada frontera: posiciones y órdenes pendientes pasan de una ventana a otra.
+    `prior_trial_sharpes`: Sharpe anualizado de pruebas anteriores (CLI o Claude); cuentan para
+    el número de pruebas y para el umbral del Sharpe deflactado.
     """
     all_days = sorted({b["day"] for bars in prices.values() for b in bars})
     start = start or all_days[0]
@@ -252,11 +277,9 @@ def walk_forward(prices: Prices, strategy_name: str, *, start: str | None = None
         holdout_from = hf.isoformat()
         end = (hf - timedelta(days=1)).isoformat()  # el día de corte ya es holdout
     combos = param_grid or grid(strategy_name)
-    folds, trial_srs = [], []
-    oos_curve: list[tuple[str, float]] = []
-    oos_pnls: list[float] = []
-    exposures: list[float] = []
-    level = capital
+    folds: list[dict] = []
+    trial_srs: list[float] = []
+    schedule: list[tuple[str, Strategy]] = []
     t0 = start
     while True:
         train_end = _add_years(t0, train_years)
@@ -271,27 +294,32 @@ def walk_forward(prices: Prices, strategy_name: str, *, start: str | None = None
             trial_srs.append(r.metrics.sharpe_period)
             if best_res is None or (r.metrics.sharpe, r.metrics.cagr) > (best_res.metrics.sharpe, best_res.metrics.cagr):
                 best, best_res = params, r
-        test = run_backtest(prices, make(strategy_name, **best), _add_years(train_end, 1 / 365.25), test_end,
-                            capital=capital, limits=limits, costs=costs)
-        # encadenar la ventana de prueba a la curva fuera de muestra
-        oos_pnls += test.pnls
-        exposures.append(test.avg_exposure)
-        if test.curve:
-            base = test.curve[0][1]
-            for d, e in test.curve:
-                oos_curve.append((d, level * e / base))
-            level = oos_curve[-1][1]
-        folds.append({"entrena": [t0, train_end], "prueba": [test.start, test.end], "parametros": best,
-                      "sharpe_entrenamiento": round(best_res.metrics.sharpe, 3),
-                      "sharpe_prueba": round(test.metrics.sharpe, 3), "cagr_prueba": round(test.metrics.cagr, 4)})
+        test_start = _add_years(train_end, 1 / 365.25)
+        schedule.append((test_start, make(strategy_name, **best)))
+        folds.append({"entrena": [t0, train_end], "prueba": [test_start, test_end], "parametros": best,
+                      "sharpe_entrenamiento": round(best_res.metrics.sharpe, 3)})
         if test_end >= end:
             break
         t0 = _add_years(t0, test_years)
+
+    oos_curve: list[tuple[str, float]] = []
+    oos_pnls: list[float] = []
+    exposure = 0.0
+    if schedule:
+        run = run_backtest(prices, _Scheduled(strategy_name, schedule), schedule[0][0], folds[-1]["prueba"][1],
+                           capital=capital, limits=limits, costs=costs)
+        oos_curve, oos_pnls, exposure = run.curve, run.pnls, run.avg_exposure
+        for f in folds:
+            part = [(d, e) for d, e in oos_curve if f["prueba"][0] <= d <= f["prueba"][1]]
+            m = metrics(part)
+            f["prueba"] = [part[0][0], part[-1][0]] if part else f["prueba"]
+            f.update(sharpe_prueba=round(m.sharpe, 3), cagr_prueba=round(m.cagr, 4))
     oos = metrics(oos_curve, oos_pnls)
-    n_trials = len(trial_srs) + extra_trials
-    sr_star = expected_max_sharpe(trial_srs) if n_trials > 1 else 0.0
+    prior = [x / math.sqrt(TRADING_DAYS) for x in (prior_trial_sharpes or []) if x is not None]
+    all_srs = trial_srs + prior
+    n_trials = len(all_srs)
+    sr_star = expected_max_sharpe(all_srs) if n_trials > 1 else 0.0
     dsr = probabilistic_sharpe(oos.sharpe_period, sr_star, max(len(oos_curve) - 1, 0), oos.skew, oos.kurtosis)
     first = next(iter(prices))
     bench = _benchmark(prices, first, [d for d, _ in oos_curve])
-    return WalkForwardResult(strategy_name, folds, oos_curve, oos, bench, n_trials, dsr, holdout_from,
-                             fmean(exposures) if exposures else 0.0)
+    return WalkForwardResult(strategy_name, folds, oos_curve, oos, bench, n_trials, dsr, holdout_from, exposure)

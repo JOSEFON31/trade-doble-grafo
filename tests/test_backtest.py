@@ -82,8 +82,21 @@ class WalkForwardTest(unittest.TestCase):
         self.assertEqual(len(days), len(set(days)))              # sin solapes entre ventanas
         self.assertEqual(r.trials, 2 * len(r.folds))
         r2 = walk_forward(PRICES, "cruce_medias", train_years=2, test_years=1, holdout_months=6,
-                          param_grid=[{"fast": 20, "slow": 100}, {"fast": 50, "slow": 100}], extra_trials=500)
-        self.assertLessEqual(r2.deflated_sharpe_prob, r.deflated_sharpe_prob + 1e-9)
+                          param_grid=[{"fast": 20, "slow": 100}, {"fast": 50, "slow": 100}],
+                          prior_trial_sharpes=[-1.5, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0] * 30)
+        self.assertEqual(r2.trials, r.trials + 210)
+        self.assertLess(r2.deflated_sharpe_prob, r.deflated_sharpe_prob)    # umbral más exigente
+
+    def test_cartera_continua_entre_ventanas(self):
+        # comprar y mantener: con cartera continua compra una sola vez y no vuelve a comprar en cada ventana
+        r = walk_forward(PRICES, "comprar_mantener", train_years=1, test_years=1, holdout_months=0)
+        self.assertGreaterEqual(len(r.folds), 3)
+        eq = dict(r.oos_curve)
+        days = [d for d, _ in r.oos_curve]
+        for f in r.folds[1:]:
+            i = days.index(f["prueba"][0])
+            # si la cartera se reiniciara, el primer día de cada ventana estaría todo en efectivo (sin cambio)
+            self.assertNotEqual(eq[days[i]], eq[days[i - 1]])
 
 
 class SimuladorCLITest(unittest.TestCase):

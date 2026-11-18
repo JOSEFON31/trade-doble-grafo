@@ -65,9 +65,11 @@ def record_trial(g: DoubleGraph, strategy: str, params: dict, start: str, end: s
     return g.db.execute("SELECT COUNT(*) FROM backtest_trials WHERE strategy=?", (strategy,)).fetchone()[0]
 
 
-def trial_count(g: DoubleGraph, strategy: str) -> int:
+def prior_sharpes(g: DoubleGraph, strategy: str) -> list[float]:
+    """Sharpe anualizado de todas las pruebas anteriores registradas para la estrategia."""
     g.db.executescript(TRIALS_SCHEMA)
-    return g.db.execute("SELECT COUNT(*) FROM backtest_trials WHERE strategy=?", (strategy,)).fetchone()[0]
+    return [r[0] for r in g.db.execute("SELECT sharpe FROM backtest_trials WHERE strategy=? AND sharpe IS NOT NULL",
+                                       (strategy,))]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,11 +128,11 @@ def main(argv: list[str] | None = None) -> int:
                 n = record_trial(g, name, params, r.start, r.end, r.metrics, "cli") if not args.sintetico else 0
                 d = r.as_dict() | {"pruebas_acumuladas": n}
             else:
-                prev = 0 if args.sintetico else trial_count(g, name)
+                prev = [] if args.sintetico else prior_sharpes(g, name)
                 r = walk_forward(prices, name, start=args.desde, end=args.hasta, train_years=args.entrena_anios,
                                  test_years=args.prueba_anios, holdout_months=args.holdout_meses,
                                  use_holdout=args.usar_holdout, capital=args.capital, limits=limits,
-                                 extra_trials=prev)
+                                 prior_trial_sharpes=prev)
                 d = r.as_dict()
             out.append(d)
             _print_summary(d)
