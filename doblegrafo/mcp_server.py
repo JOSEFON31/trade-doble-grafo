@@ -304,6 +304,40 @@ def decisiones_riesgo(limite: int = 20) -> dict:
                             "motivos": json.loads(r["reasons"]), "dia": r["day"]} for r in rows]}
 
 
+# ================================================== simulador (sin dinero, sin holdout)
+@mcp.tool()
+def estrategias_disponibles() -> dict:
+    """Estrategias deterministas que se pueden simular y sus parámetros por defecto y alternativos."""
+    from .strategies import REGISTRY
+    return {n: {"parametros": c.PARAM_GRID, "descripcion": (c.__doc__ or "").strip()} for n, c in REGISTRY.items()}
+
+
+@mcp.tool()
+def lanzar_backtest(estrategia: str, parametros: dict | None = None, simbolos: list[str] | None = None,
+                    desde: str | None = None) -> dict:
+    """Simula una variante de estrategia con los precios históricos guardados, con el mismo gestor de riesgo.
+
+    Nunca usa los últimos 12 meses (holdout reservado). Cada llamada cuenta como una prueba más: cuantas
+    más pruebes, más exigente es el Sharpe deflactado. No toca la cartera de paper.
+    """
+    from .backtest import run_backtest
+    from .simulador import holdout_start, load_prices, record_trial
+    from .strategies import make
+    prices = load_prices(g(), simbolos)
+    if not prices:
+        return {"error": "no hay precios guardados; el humano debe correr trader-ejecutor o trader-backtest --descargar"}
+    params = parametros or {}
+    strat = make(estrategia, **params)
+    end = holdout_start(prices)
+    start = desde or min(b["day"] for bars in prices.values() for b in bars)
+    types = {r["symbol"]: r["type"] for r in g().db.execute("SELECT symbol, type FROM instruments")}
+    r = run_backtest(prices, strat, start, end, limits=RiskLimits.load(), instrument_types=types)
+    n = record_trial(g(), estrategia, params, r.start, r.end, r.metrics, "claude")
+    return r.as_dict() | {"pruebas_acumuladas_de_esta_estrategia": n,
+                          "aviso": "Resultado dentro de muestra. Solo el walk-forward fuera de muestra y luego "
+                                   "el paper trading cuentan como evidencia."}
+
+
 def main() -> None:
     mcp.run()
 
