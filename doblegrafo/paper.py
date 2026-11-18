@@ -174,6 +174,12 @@ class PaperBroker:
 
     # ---------------------------------------------------------- día
     def run_day(self, day: str) -> dict:
+        """Día completo: apertura (llenados y stops) y cierre (valoración y propuestas)."""
+        report = self.open_day(day)
+        return self.close_day(day, report)
+
+    def open_day(self, day: str) -> dict:
+        """Fase de apertura de D: llena órdenes pendientes y revisa stops."""
         a = self.account()
         if a["last_day"] and day <= a["last_day"]:
             raise GraphError(f"el día {day} ya se procesó (último: {a['last_day']})")
@@ -181,6 +187,14 @@ class PaperBroker:
         with self.g._tx():
             self._fill_pending(day, report)
             self._check_stops(day, report)
+        return report
+
+    def close_day(self, day: str, report: dict) -> dict:
+        """Fase de cierre de D: valora, pasa propuestas por riesgo y guarda la curva de capital.
+
+        Entre open_day y close_day los agentes pueden escribir propuestas con el cierre de D.
+        """
+        with self.g._tx():
             st = self.state(day)
             self.db.execute("UPDATE account SET peak_equity=MAX(peak_equity,?) WHERE id=1", (st.equity,))
             self._process_proposals(day, st, report)

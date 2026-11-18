@@ -98,17 +98,40 @@ Sin internet o sin Stooq puedes cargar precios desde CSV: `trader-ejecutor --csv
 
 Claude ve la cartera con `estado_cartera` y los motivos de cada veto con `decisiones_riesgo`, pero no puede aprobar, ejecutar ni cambiar límites. `.claude/settings.json` además le niega editar `~/.trader/`, usar `sqlite3` y reiniciar el kill switch.
 
+## Simulador con datos históricos
+
+`trader-backtest` simula años de mercado en segundos con las mismas piezas que el paper trading: doble grafo, gestor de riesgo, llenado a la apertura siguiente, costes y stops. Corre en memoria, no toca tu cartera de paper y no gasta tu plan de Claude, porque las estrategias son reglas deterministas.
+
+```bash
+trader-backtest --descargar SPY QQQ IWM EFA TLT GLD   # baja históricos de Stooq (una vez)
+trader-backtest --estrategia todas                    # walk-forward de las 4 estrategias
+trader-backtest --estrategia momentum --modo simple --params '{"lookback": 63}'
+trader-backtest --sintetico                           # datos inventados, solo para ver que todo corre
+```
+
+Cómo evita engañarse:
+
+- **Sin datos del futuro:** la estrategia solo ve barras hasta el cierre del día de decisión y la orden se llena al día siguiente.
+- **Walk-forward:** elige parámetros con 3 años y los prueba en el año siguiente, que no vio; luego avanza un año. Solo cuenta la curva fuera de muestra.
+- **Holdout:** los últimos 12 meses quedan reservados. Úsalos una sola vez al final con `--usar-holdout`.
+- **Sharpe deflactado:** cuenta todas las pruebas hechas (también las de Claude) y da la probabilidad de que el Sharpe no sea suerte. Por debajo de 95 % se marca como no fiable.
+- **Referencia:** cada resultado se compara con comprar y mantener el primer símbolo.
+
+Estrategias incluidas: `comprar_mantener`, `momentum`, `cruce_medias` y `reversion`. Claude puede probar variantes con la herramienta MCP `lanzar_backtest` (nunca usa el holdout y cada prueba queda contada) y con el comando `/evolucion-semanal`.
+
+Nota: con los límites por defecto (10 % por instrumento) y pocos instrumentos, el sistema estará poco invertido. El simulador muestra la "exposición media" para que lo veas; con unos 10 ETFs puede llegar a invertir el 100 %.
+
 ## Pruebas
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-26 pruebas: el doble grafo (deduplicación, reglas de aristas, ciclos, point-in-time, inmutabilidad, planificador, crédito, concurrencia), el servidor MCP de punta a punta, el gestor de riesgo (tamaño por riesgo, recortes, vetos, kill switch, archivo de límites) y el paper trading (llenado al día siguiente, stop con crédito negativo en el grafo, orden cancelada por precio anómalo, CLI con CSV).
+36 pruebas: doble grafo, servidor MCP de punta a punta, gestor de riesgo, paper trading y simulador (sin datos del futuro, determinismo, límites de riesgo respetados, ventanas walk-forward sin solapes, holdout excluido, Sharpe deflactado más exigente con más pruebas, CLI).
 
 ## Siguiente paso
 
-Correr paper trading al menos 3 meses y 100 operaciones antes de pensar en dinero real (ver el plan). Después: backtester walk-forward con los mismos módulos y ciclo de evolución de estrategias.
+Descargar históricos reales de un universo de ETFs, correr el walk-forward y, solo con lo que pase, arrancar el paper trading de al menos 3 meses.
 
 ## Licencia
 
