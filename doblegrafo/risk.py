@@ -90,32 +90,35 @@ def evaluate(p: ProposalView, acct: AccountState, last_price: float | None, pric
     def veto(msg: str, kill: bool = False) -> Decision:
         return Decision("vetoed", 0.0, reasons + [msg], kill)
 
-    # 1) interruptores globales
+    kill_now = acct.drawdown >= limits.drawdown_kill - 1e-9
+    held_qty = acct.quantities.get(p.symbol, 0.0)
+
+    # 1) ventas: siempre se permite reducir o cerrar una posición larga, incluso con el
+    #    kill switch o el límite diario activos (reducen riesgo). Sin cortos.
+    if p.side == "sell":
+        if held_qty <= 0 and not limits.allow_short:
+            return veto("ventas en corto no permitidas", kill=kill_now and not acct.kill_switch)
+        qty = min(p.qty, held_qty)
+        if qty < p.qty:
+            reasons.append(f"venta recortada a la posición existente ({qty:g})")
+        return Decision("approved", qty, reasons + ["cierre o reducción de posición"],
+                        kill=kill_now and not acct.kill_switch)
+
+    # 2) interruptores globales: bloquean nuevas compras
     if acct.kill_switch:
         return veto("kill switch activo")
-    if acct.drawdown >= limits.drawdown_kill - 1e-9:
+    if kill_now:
         return veto(f"caída {acct.drawdown:.1%} >= {limits.drawdown_kill:.0%}: se activa kill switch", kill=True)
     if acct.day_pnl_pct <= -limits.daily_loss_stop + 1e-9:
         return veto(f"pérdida del día {acct.day_pnl_pct:.1%} alcanza el límite de {limits.daily_loss_stop:.0%}")
 
-    # 2) instrumento y datos
+    # 3) instrumento y datos
     if not p.tradable or p.instrument_type not in limits.allowed_types:
         return veto(f"{p.symbol} no es operable o su tipo '{p.instrument_type}' no está permitido")
     if last_price is None or last_price <= 0:
         return veto(f"sin precio para {p.symbol}")
     if price_age_days is None or price_age_days > limits.max_price_age_days:
         return veto(f"precio de {p.symbol} demasiado viejo ({price_age_days} días)")
-
-    held_qty = acct.quantities.get(p.symbol, 0.0)
-
-    # 3) ventas: solo para reducir una posición larga existente (sin cortos)
-    if p.side == "sell":
-        if held_qty <= 0 and not limits.allow_short:
-            return veto("ventas en corto no permitidas")
-        qty = min(p.qty, held_qty)
-        if qty < p.qty:
-            reasons.append(f"venta recortada a la posición existente ({qty:g})")
-        return Decision("approved", qty, reasons + ["cierre o reducción de posición"])
 
     # 4) compras: stop coherente y precio sano
     if p.stop >= last_price:

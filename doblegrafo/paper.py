@@ -284,6 +284,12 @@ class PaperBroker:
     def _process_proposals(self, day: str, st: AccountState, report: dict) -> None:
         rows = self.db.execute(
             "SELECT id FROM nodes WHERE kind='proposal' AND state='pending' ORDER BY id").fetchall()
+        # reservar la exposición de compras aprobadas antes que aún esperan llenarse
+        for o in self.db.execute("SELECT symbol, SUM(qty) q FROM orders WHERE side='buy' AND status='pending'"
+                                 " GROUP BY symbol").fetchall():
+            ob = self.last_bar(o["symbol"], day)
+            if ob is not None:
+                st.positions[o["symbol"]] = st.positions.get(o["symbol"], 0.0) + o["q"] * ob["close"]
         for r in rows:
             p = self.g.node(r["id"])
             sym = str(p.payload.get("symbol", "")).upper()

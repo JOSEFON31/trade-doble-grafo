@@ -46,6 +46,15 @@ class RiesgoTest(unittest.TestCase):
         self.assertTrue(d.kill)
         self.assertEqual(evaluate(buy(), acct(kill=True), 100.0, 0, L).verdict, "vetoed")
 
+    def test_ventas_permitidas_con_limites_activos(self):
+        sell = ProposalView("SPY", "sell", 5, 1, "etf", True)
+        held = dict(qtys={"SPY": 10}, positions={"SPY": 1000})
+        self.assertEqual(evaluate(sell, acct(day_start=10_300, **held), 100.0, 0, L).verdict, "approved")
+        self.assertEqual(evaluate(sell, acct(kill=True, **held), 100.0, 0, L).verdict, "approved")
+        d = evaluate(sell, acct(equity=7_900, peak=10_000, **held), 100.0, 0, L)
+        self.assertEqual(d.verdict, "approved")
+        self.assertTrue(d.kill)
+
     def test_venta_recortada_a_posicion(self):
         sell = ProposalView("SPY", "sell", 50, 1, "etf", True)
         d = evaluate(sell, acct(qtys={"SPY": 10}, positions={"SPY": 1000}), 100.0, 0, L)
@@ -129,6 +138,15 @@ class PaperTest(unittest.TestCase):
         r = self.b.run_day("2026-11-17")
         self.assertEqual(r["fills"], [])
         self.assertTrue(any("anómalo" in s for s in r["skipped"]))
+
+    def test_compra_pendiente_reserva_exposicion(self):
+        self.propose()
+        self.b.run_day("2026-11-16")                     # aprobada: 10 acciones = 10 % del capital
+        self.b.db.execute("DELETE FROM prices WHERE symbol='SPY' AND day='2026-11-17'")
+        self.b.store_prices("QQQ", [{"day": "2026-11-17", "open": 1, "high": 1, "low": 1, "close": 1}], "t")
+        self.propose(at="2026-11-16T22:00:00Z")
+        r = self.b.run_day("2026-11-17")                 # SPY sin barra: la orden sigue pendiente
+        self.assertEqual(r["decisions"][0]["verdict"], "vetoed")
 
     def test_no_se_repite_un_dia_y_no_hay_cortos(self):
         self.propose(side="sell", qty=5, stop=105)
