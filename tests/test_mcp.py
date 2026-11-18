@@ -65,6 +65,8 @@ class MCPTest(unittest.TestCase):
         out = asyncio.run(_flujo(db))
         for forbidden in ("aprobar", "ejecutar", "record_outcome", "add_constraint"):
             self.assertFalse(any(forbidden in t for t in out["tools"]))
+        self.assertIn("estado_cartera", out["tools"])
+        self.assertIn("decisiones_riesgo", out["tools"])
         self.assertEqual(out["nuevas"], 1)
         self.assertIn("fuente", out["sin_fuente"]["error"])
         self.assertIn("error", out["otro_agente"])
