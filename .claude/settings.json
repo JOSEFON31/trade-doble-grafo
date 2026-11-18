@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(~/.trader/**)",
+      "Write(~/.trader/**)",
+      "Bash(trader-ejecutor --reset-kill-switch:*)",
+      "Bash(sqlite3:*)"
+    ]
+  }
+}

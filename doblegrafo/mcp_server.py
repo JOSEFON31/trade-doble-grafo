@@ -13,6 +13,7 @@ Base de datos: variable de entorno TRADER_DB (por defecto ~/.trader/trader.db).
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Literal
@@ -21,6 +22,8 @@ from mcp.server.fastmcp import FastMCP
 
 from .coord import Planner
 from .graph import DoubleGraph, GraphError, Node
+from .paper import PaperBroker
+from .risk import RiskLimits
 
 mcp = FastMCP(
     "trader-doble-grafo",
@@ -30,7 +33,8 @@ mcp = FastMCP(
         "Flujo: iniciar_ciclo -> ronda_planificador -> (trabajadores) reclamar_intencion -> "
         "registrar_resultado / proponer_operacion -> terminar_intencion. "
         "Nunca inventes datos de mercado: cada hecho debe venir de una fuente y llevar disponible_en. "
-        "Las propuestas solo quedan pendientes; las aprueba el gestor de riesgo, no tú."
+        "Las propuestas solo quedan pendientes; las aprueba el gestor de riesgo (código) cuando el humano corre el ejecutor, no tú. "
+        "Consulta estado_cartera y decisiones_riesgo para aprender de lo aprobado y lo vetado."
     ),
 )
 
@@ -264,6 +268,40 @@ def linaje(nodo_id: int) -> dict:
 def credito_por_agente() -> dict:
     """Crédito realizado (ganancia o pérdida neta repartida) acumulado por cada agente."""
     return {"credito": g().credit_by_owner()}
+
+
+# ======================================================= cartera (solo lectura)
+@mcp.tool()
+def estado_cartera() -> dict:
+    """Cartera de paper trading: capital, caída, kill switch, posiciones abiertas, órdenes pendientes y límites."""
+    b = PaperBroker(g())
+    try:
+        a = b.account()
+    except GraphError:
+        return {"mensaje": "aún no hay cuenta de paper; el humano debe correr `trader-ejecutor --capital N`"}
+    day = a["last_day"] or ""
+    st = b.state(day)
+    lots = [dict(r) for r in b.db.execute(
+        "SELECT symbol AS simbolo, qty AS cantidad, entry AS entrada, stop, proposal_id AS propuesta,"
+        " opened_day AS desde FROM lots ORDER BY id")]
+    orders = [dict(r) for r in b.db.execute(
+        "SELECT proposal_id AS propuesta, symbol AS simbolo, side AS lado, qty AS cantidad"
+        " FROM orders WHERE status='pending' ORDER BY id")]
+    from dataclasses import asdict
+    return {"ultimo_dia": a["last_day"], "capital": round(st.equity, 2), "efectivo": round(a["cash"], 2),
+            "capital_inicial": a["initial_cash"], "caida_desde_maximo": round(st.drawdown, 4),
+            "kill_switch": bool(a["kill_switch"]), "motivo_kill_switch": a["kill_reason"],
+            "lotes": lots, "ordenes_pendientes": orders, "limites": asdict(RiskLimits.load())}
+
+
+@mcp.tool()
+def decisiones_riesgo(limite: int = 20) -> dict:
+    """Últimas decisiones del gestor de riesgo sobre las propuestas (aprobada/vetada, cantidad y motivos)."""
+    PaperBroker(g())
+    rows = g().db.execute("SELECT * FROM risk_decisions ORDER BY day DESC, proposal_id DESC LIMIT ?",
+                          (max(1, min(limite, 100)),)).fetchall()
+    return {"decisiones": [{"propuesta": r["proposal_id"], "veredicto": r["verdict"], "cantidad": r["qty"],
+                            "motivos": json.loads(r["reasons"]), "dia": r["day"]} for r in rows]}
 
 
 def main() -> None:

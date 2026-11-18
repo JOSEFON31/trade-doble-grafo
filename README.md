@@ -70,17 +70,45 @@ No existe ninguna herramienta para aprobar o ejecutar órdenes, registrar gananc
 - `analista`: toma intenciones "analyze", trae datos reales y registra hechos y hallazgos.
 - `estratega`: toma intenciones "propose" y propone operaciones solo con evidencia sólida.
 
+## Gestor de riesgo y paper trading
+
+El gestor de riesgo (`doblegrafo/risk.py`) es código fijo que aprueba, recorta o veta cada propuesta. Sus límites están en `~/.trader/limites.json`, que se crea con estos valores la primera vez y solo tú editas:
+
+| Límite | Valor por defecto |
+| --- | --- |
+| Riesgo por operación (entrada − stop) | 0,5 % del capital (la mitad si la caída supera 10 %) |
+| Exposición por instrumento | 10 % del capital |
+| Exposición total | 100 % (sin apalancamiento) |
+| Pérdida del día | 2 % → no se abren operaciones |
+| Caída desde el máximo | 20 % → kill switch |
+| Precio de llenado | ±10 % del cierre previo, si no la orden se cancela |
+| Antigüedad del precio | máx. 5 días |
+| Tipos permitidos | ETF y acciones; sin ventas en corto |
+
+El broker de paper (`doblegrafo/paper.py`) usa precios diarios reales y simula con honestidad: las órdenes decididas tras el cierre de un día se llenan a la apertura del siguiente, con deslizamiento (5 pb por defecto) y comisión configurable; los stops se revisan con el mínimo del día y, si el mercado abre por debajo, se sale a la apertura. Cada cierre registra su ganancia o pérdida neta en el grafo y reparte el crédito entre los agentes que originaron la compra.
+
+### Rutina diaria en tu PC
+
+1. Primera vez: `trader-ejecutor --capital 10000` (capital ficticio de paper).
+2. Cada día, tras el cierre de EE. UU.: en Claude Code, `/ciclo-diario` (analiza y propone).
+3. Después: `trader-ejecutor` (baja precios de Stooq, llena órdenes, revisa stops y pasa las propuestas por el gestor de riesgo). Puedes programar ambos con el Programador de tareas de Windows o cron.
+4. Si salta el kill switch, revisa qué pasó y solo entonces: `trader-ejecutor --reset-kill-switch`.
+
+Sin internet o sin Stooq puedes cargar precios desde CSV: `trader-ejecutor --csv SPY=spy.csv --sin-descarga`.
+
+Claude ve la cartera con `estado_cartera` y los motivos de cada veto con `decisiones_riesgo`, pero no puede aprobar, ejecutar ni cambiar límites. `.claude/settings.json` además le niega editar `~/.trader/`, usar `sqlite3` y reiniciar el kill switch.
+
 ## Pruebas
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-13 pruebas: deduplicación, reglas de aristas, ciclos, point-in-time, inmutabilidad, transiciones, planificador con restricciones, flujo completo con crédito, errores, ramas frías y digest, límites del checkpoint, dos trabajadores en paralelo sin reclamar lo mismo, y un flujo completo por MCP (arranca el servidor y lo usa como Claude Code).
+26 pruebas: el doble grafo (deduplicación, reglas de aristas, ciclos, point-in-time, inmutabilidad, planificador, crédito, concurrencia), el servidor MCP de punta a punta, el gestor de riesgo (tamaño por riesgo, recortes, vetos, kill switch, archivo de límites) y el paper trading (llenado al día siguiente, stop con crédito negativo en el grafo, orden cancelada por precio anómalo, CLI con CSV).
 
 ## Siguiente paso
 
-Gestor de riesgo y ejecutor en paper trading (fase 2 del plan).
+Correr paper trading al menos 3 meses y 100 operaciones antes de pensar en dinero real (ver el plan). Después: backtester walk-forward con los mismos módulos y ciclo de evolución de estrategias.
 
 ## Licencia
 
