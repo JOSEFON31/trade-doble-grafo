@@ -136,3 +136,16 @@ Descargar históricos reales de un universo de ETFs, correr el walk-forward y, s
 ## Licencia
 
 ARTEX es AGPL-3.0. Aquí no se incluye código suyo, solo se reimplementó la estructura de datos de forma independiente.
+
+## Tercer grafo: registro de señales externas
+
+`doblegrafo/senales.py` guarda cada fuente externa (funding, basis, volatilidad implícita, halving...) como una señal con sus valores point-in-time (`ts` y `published_at`; `as_of()` nunca devuelve algo publicado después) y sin edición posible. Cada ventana fuera de muestra suma o resta crédito (Sharpe de la señal menos el de la referencia, con olvido de vida media 4 ventanas). Tras 3 ventanas, si el crédito es negativo la señal se apaga sola.
+
+Primera señal: **carry de funding** (`doblegrafo/carry.py`): comprar spot y vender el perpetuo cuando el funding anualizado de los últimos N días supera un umbral. Es delta neutral: gana el funding, no la dirección. Cuenta comisiones, rebalanceos del margen y liquidaciones intradía del corto.
+
+```
+trader-carry --descargar --datos datos/carry --simbolos BTCUSDT ETHUSDT DOGEUSDT
+trader-carry --datos datos/carry --simbolos BTCUSDT ETHUSDT DOGEUSDT --desde-oos 2024-01-01
+```
+
+Criterio para quedarse con una señal: Sharpe fuera de muestra (2024 en adelante) mejor que la referencia, caída máxima menor, Sharpe deflactado alto, y luego 3 meses en paper.

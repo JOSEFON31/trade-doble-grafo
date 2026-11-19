@@ -9,6 +9,7 @@ dependencies = ["mcp>=1.9,<2"]
 trader-mcp = "doblegrafo.mcp_server:main"
 trader-ejecutor = "doblegrafo.ejecutor:main"
 trader-backtest = "doblegrafo.simulador:main"
+trader-carry = "doblegrafo.carry:main"
 
 [tool.setuptools]
 packages = ["doblegrafo"]
