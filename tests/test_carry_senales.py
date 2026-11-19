@@ -77,6 +77,17 @@ class Carry(unittest.TestCase):
         cb = simulate(b, {"ventana": 1, "entrada": 0.05}, b.days[0], b.days[-1]).curve
         self.assertEqual(ca[:k], cb[:k])
 
+    def test_senal_excluye_liquidacion_de_las_00(self):
+        m = mercado(days=10, rate=lambda i: 0.0 if i < 5 else 0.01)
+        # cobro de las 00:00 del día 5 (índice 4 en la lista) pertenece al día 4; no se conoce al cierre del día 4
+        self.assertEqual(m.funding_annualized(m.days[4], 1), 0.0)
+
+    def test_calendario_mantiene_posicion(self):
+        m = mercado(rate=lambda i: 0.0001)
+        sched = [(m.days[0], {"siempre": True}), (m.days[300], {"ventana": 7, "entrada": 0.0})]
+        res = simulate(m, sched, m.days[0], m.days[-1])
+        self.assertEqual(res.trades, 1)  # no cierra ni reabre en la frontera
+
     def test_liquidacion_se_cuenta(self):
         m = mercado(spike=300, vol=0.0)
         res = simulate(m, {"siempre": True}, m.days[0], m.days[-1], costs=Costs(leverage=2))
@@ -87,7 +98,8 @@ class Carry(unittest.TestCase):
         reg = SignalRegistry(min_windows=2)
         wf = walk_forward(m, train_months=12, test_months=6, oos_from="2022-01-01", registry=reg)
         self.assertGreaterEqual(len(wf.windows), 3)
-        s = reg.signal("carry_funding:SINT")
+        s = reg.signal("carry:SINT")
+        self.assertEqual(reg.signal("filtro_funding:SINT").windows, len(wf.windows))
         self.assertEqual(s.windows, len(wf.windows))
         self.assertIn(s.state, ("activa", "apagada"))
         self.assertTrue(all(w["prueba"] >= "2022-01-01" for w in wf.windows))

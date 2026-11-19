@@ -31,7 +31,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from itertools import product
@@ -68,10 +68,14 @@ class Market:
         return [r for _, r in self.funding[i:j]]
 
     def funding_annualized(self, day: str, window: int) -> float | None:
-        """Funding anualizado de los últimos `window` días, publicado hasta el cierre de `day`."""
+        """Funding anualizado de los últimos `window` días, conocido ANTES del cierre de `day`.
+
+        Cobros en [inicio, cierre): la liquidación de las 00:00 UTC del día siguiente cae
+        justo en el momento de decidir y se excluye, para no usar un dato aún no publicado.
+        """
         end = _day_open(day) + timedelta(days=1)
         start = end - timedelta(days=window)
-        i, j = bisect_right(self._times, start), bisect_right(self._times, end)
+        i, j = bisect_left(self._times, start), bisect_left(self._times, end)
         if j <= i or (self.funding and self.funding[0][0] > start):
             return None
         return (self._cum[j] - self._cum[i]) * DAYS / window
@@ -126,29 +130,45 @@ class CarryResult:
     liquidations: int
     funding_earned: float
     costs_paid: float
+    daily: list[dict] = field(default_factory=list)  # por día: dentro, funding, costes, liquidación
+
+    def window(self, start: str, end: str) -> dict:
+        rows = [r for r in self.daily if start <= r["day"] <= end]
+        return {"exposicion": sum(r["dentro"] for r in rows) / max(len(rows), 1),
+                "liquidaciones": sum(r["liq"] for r in rows),
+                "funding_cobrado": sum(r["funding"] for r in rows), "costes": sum(r["coste"] for r in rows)}
 
     def returns(self) -> list[float]:
         return [b / a - 1 for (_, a), (_, b) in zip(self.curve, self.curve[1:]) if a > 0]
 
 
-def simulate(m: Market, params: dict, start: str, end: str, *, capital: float = 100.0,
-             costs: Costs | None = None) -> CarryResult:
+def simulate(m: Market, params: dict | list[tuple[str, dict]], start: str, end: str, *,
+             capital: float = 100.0, costs: Costs | None = None) -> CarryResult:
     """Simula la regla: entrar si el funding anualizado > entrada, salir si < entrada/2.
 
     `params = {"ventana": días, "entrada": umbral anual}`; `{"siempre": True}` = siempre dentro.
+    También acepta un calendario `[(desde_día, params), ...]`: una sola cartera continua que
+    cambia de parámetros en cada fecha, sin cerrar ni reabrir la posición en la frontera.
     """
     c = costs or Costs()
     days = [d for d in m.days if start <= d <= end]
-    always = params.get("siempre", False)
-    window, enter = params.get("ventana", 7), params.get("entrada", 0.0)
-    leave = enter / 2
+    schedule = sorted(params, key=lambda x: x[0]) if isinstance(params, list) else [("", params)]
+    k = 0
     cash, q_spot, q_perp, margin = capital, 0.0, 0.0, 0.0
     in_pos, want = False, False
     curve, exposure_days, trades, liqs = [], 0, 0, 0
     funding_total = cost_total = 0.0
     prev_perp_close = None
+    daily: list[dict] = []
 
     for d in days:
+        while k + 1 < len(schedule) and schedule[k + 1][0] <= d:
+            k += 1
+        cur = schedule[k][1]
+        always = cur.get("siempre", False)
+        window, enter = cur.get("ventana", 7), cur.get("entrada", 0.0)
+        leave = enter / 2
+        f_before, c_before, l_before, was_in = funding_total, cost_total, liqs, in_pos or want
         sp, pp = m.spot[d], m.perp[d]
         # 1) ejecutar a la apertura lo decidido ayer al cierre
         if want and not in_pos:
@@ -200,6 +220,8 @@ def simulate(m: Market, params: dict, start: str, end: str, *, capital: float = 
 
         equity = cash + (q_spot * sp["close"] + margin if in_pos else 0.0)
         curve.append((d, equity))
+        daily.append({"day": d, "dentro": int(was_in and (in_pos or liqs > l_before)),
+                      "funding": funding_total - f_before, "coste": cost_total - c_before, "liq": liqs - l_before})
 
         # 3) decidir al cierre con lo publicado hasta el cierre
         if always:
@@ -208,8 +230,8 @@ def simulate(m: Market, params: dict, start: str, end: str, *, capital: float = 
             ann = m.funding_annualized(d, window)
             if ann is not None:
                 want = ann > enter if not in_pos else ann > leave
-    return CarryResult(m.symbol, params, curve, exposure_days / max(len(days), 1), trades, liqs,
-                       funding_total, cost_total)
+    return CarryResult(m.symbol, schedule[-1][1], curve, exposure_days / max(len(days), 1), trades, liqs,
+                       funding_total, cost_total, daily)
 
 
 # ============================================================ métricas
@@ -263,16 +285,17 @@ class WalkForward:
 def walk_forward(m: Market, *, train_months: int = 24, test_months: int = 6, oos_from: str = "2024-01-01",
                  capital: float = 100.0, costs: Costs | None = None,
                  registry: SignalRegistry | None = None) -> WalkForward:
+    """Elige parámetros en cada ventana de entrenamiento y corre UNA cartera continua fuera de muestra.
+
+    Al registro van dos señales con referencias distintas:
+    - `carry:<símbolo>`: la estrategia completa contra quedarse en efectivo (Sharpe 0).
+    - `filtro_funding:<símbolo>`: el umbral de entrada contra estar siempre dentro del carry.
+    """
     grid = param_grid()
     wf = WalkForward(m.symbol)
     first, last = m.days[0], m.days[-1]
     test_start = max(oos_from, _add_months(first, train_months))
-    eq = eq_always = eq_hodl = capital
-    signal = f"carry_funding:{m.symbol}"
-    if registry:
-        registry.register(signal, "Binance funding perpetuo", "carry",
-                          "Comprar spot y vender perpetuo cuando el funding anualizado supera un umbral",
-                          (m.symbol,))
+    windows, schedule = [], []
     while test_start <= last:
         test_end = min(_add_months(test_start, test_months), last)
         train_start = _add_months(test_start, -train_months)
@@ -283,28 +306,42 @@ def walk_forward(m: Market, *, train_months: int = 24, test_months: int = 6, oos
             scored.append((s["sharpe"], s["retorno_total"], p))
             wf.trial_srs.append(s["sr_p"])
         best = max(scored, key=lambda x: (x[0], x[1]))[2]
-        test = simulate(m, best, test_start, test_end, capital=eq, costs=costs)
-        always = simulate(m, {"siempre": True}, test_start, test_end, capital=eq_always, costs=costs)
-        s_t, s_a = stats(test.curve), stats(always.curve)
-        sp = [m.spot[d]["close"] for d, _ in test.curve]
-        hodl = [(d, eq_hodl * px / sp[0]) for (d, _), px in zip(test.curve, sp)] if sp else []
-        wf.curve += test.curve if not wf.curve else test.curve[1:]
-        wf.always_curve += always.curve if not wf.always_curve else always.curve[1:]
-        wf.hodl_curve += hodl if not wf.hodl_curve else hodl[1:]
-        eq = test.curve[-1][1] if test.curve else eq
-        eq_always = always.curve[-1][1] if always.curve else eq_always
-        eq_hodl = hodl[-1][1] if hodl else eq_hodl
-        wf.liquidations += test.liquidations
-        wf.windows.append({"prueba": f"{test_start} a {test_end}", "params": best,
-                           "exposicion": round(test.exposure, 2), "liquidaciones": test.liquidations,
-                           "funding_cobrado": round(test.funding_earned, 2), "costes": round(test.costs_paid, 2),
-                           **_round(s_t), "siempre_dentro_sharpe": round(s_a["sharpe"], 3)})
-        if registry and len(test.curve) > 2:
-            registry.evaluate(signal, test_start, test_end, sharpe=s_t["sharpe"], baseline_sharpe=0.0,
-                              total_return=s_t["retorno_total"], max_drawdown=s_t["caida_maxima"], params=best)
+        windows.append((test_start, test_end, best))
+        schedule.append((test_start, best))
         if test_end >= last:
             break
         test_start = (date.fromisoformat(test_end) + timedelta(days=1)).isoformat()
+    if not windows:
+        return wf
+    oos_start, oos_end = windows[0][0], windows[-1][1]
+    run = simulate(m, schedule, oos_start, oos_end, capital=capital, costs=costs)
+    always = simulate(m, {"siempre": True}, oos_start, oos_end, capital=capital, costs=costs)
+    wf.curve, wf.always_curve = run.curve, always.curve
+    p0 = m.spot[run.curve[0][0]]["close"]
+    wf.hodl_curve = [(d, capital * m.spot[d]["close"] / p0) for d, _ in run.curve]
+    wf.liquidations = run.liquidations
+    if registry:
+        registry.register(f"carry:{m.symbol}", "Binance funding perpetuo", "carry",
+                          "Spot largo + perpetuo corto con umbral de funding; referencia: efectivo", (m.symbol,))
+        registry.register(f"filtro_funding:{m.symbol}", "Binance funding perpetuo", "direccion",
+                          "Umbral de funding para entrar al carry; referencia: carry siempre dentro", (m.symbol,))
+
+    def piece(curve, a, b):  # incluye el cierre anterior para medir el primer día de la ventana
+        idx = [i for i, (d, _) in enumerate(curve) if a <= d <= b]
+        return curve[max(idx[0] - 1, 0): idx[-1] + 1] if idx else []
+
+    for a, b, best in windows:
+        s_t, s_a = stats(piece(run.curve, a, b)), stats(piece(always.curve, a, b))
+        extra = run.window(a, b)
+        wf.windows.append({"prueba": f"{a} a {b}", "params": best,
+                           "exposicion": round(extra["exposicion"], 2), "liquidaciones": extra["liquidaciones"],
+                           "funding_cobrado": round(extra["funding_cobrado"], 2), "costes": round(extra["costes"], 2),
+                           **_round(s_t), "siempre_dentro_sharpe": round(s_a["sharpe"], 3)})
+        if registry and s_t["n"] > 2:
+            common = dict(total_return=s_t["retorno_total"], max_drawdown=s_t["caida_maxima"], params=best)
+            registry.evaluate(f"carry:{m.symbol}", a, b, sharpe=s_t["sharpe"], baseline_sharpe=0.0, **common)
+            registry.evaluate(f"filtro_funding:{m.symbol}", a, b, sharpe=s_t["sharpe"],
+                              baseline_sharpe=s_a["sharpe"], **common)
     return wf
 
 
