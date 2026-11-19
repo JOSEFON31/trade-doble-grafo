@@ -295,7 +295,7 @@ def walk_forward(m: Market, *, train_months: int = 24, test_months: int = 6, oos
         eq_always = always.curve[-1][1] if always.curve else eq_always
         eq_hodl = hodl[-1][1] if hodl else eq_hodl
         wf.liquidations += test.liquidations
-        wf.windows.append({"prueba": f"{test_start} → {test_end}", "params": best,
+        wf.windows.append({"prueba": f"{test_start} a {test_end}", "params": best,
                            "exposicion": round(test.exposure, 2), "liquidaciones": test.liquidations,
                            "funding_cobrado": round(test.funding_earned, 2), "costes": round(test.costs_paid, 2),
                            **_round(s_t), "siempre_dentro_sharpe": round(s_a["sharpe"], 3)})
@@ -396,6 +396,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--registro", default=None, help="SQLite del registro de señales (por defecto ~/.trader/senales.db)")
     ap.add_argument("--json", default=None, help="guardar el informe completo en este archivo")
     a = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):  # la consola de Windows (cp1252) no imprime tildes raras
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     folder = Path(a.datos)
     if a.descargar:
         download(folder, a.simbolos)
@@ -426,7 +429,7 @@ def main(argv: list[str] | None = None) -> int:
     for row in reg.ranking():
         print(f"  {row['señal']:<28} {row['estado']:<8} crédito {row['credito']:+.2f}  ventanas {row['ventanas']}")
     if a.json:
-        Path(a.json).write_text(json.dumps(out, indent=2, ensure_ascii=False))
+        Path(a.json).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     return 0
 
 
